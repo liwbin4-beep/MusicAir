@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout repository
@@ -27,7 +27,7 @@ jobs:
           ZIP_FILE=$(find . -maxdepth 1 -type f -iname "*.zip" | head -n 1)
 
           if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: No project ZIP found."
+            echo "ERROR: Project ZIP not found."
             exit 1
           fi
 
@@ -38,12 +38,10 @@ jobs:
 
           if [ -z "$PROJECT_DIR" ]; then
             echo "ERROR: settings.gradle.kts not found."
-            find project -maxdepth 5 -type f
             exit 1
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Project directory: $PROJECT_DIR"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -55,51 +53,53 @@ jobs:
         uses: android-actions/setup-android@v4
 
       - name: Install Android SDK packages
-        shell: bash
         run: |
-          set -euo pipefail
-
           yes | sdkmanager --licenses || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
 
-          sdkmanager \
-            "platforms;android-35" \
-            "build-tools;35.0.0"
-
-      - name: Download Gradle 8.11.1
+      - name: Download Gradle with fallback mirrors
         shell: bash
         run: |
           set -euo pipefail
 
-          GRADLE_VERSION="8.11.1"
-          GRADLE_DIR="$RUNNER_TEMP/gradle-$GRADLE_VERSION"
-          GRADLE_ZIP="$RUNNER_TEMP/gradle-$GRADLE_VERSION-bin.zip"
+          VERSION="8.11.1"
+          ZIP="$RUNNER_TEMP/gradle-$VERSION-bin.zip"
+          DIR="$RUNNER_TEMP/gradle-$VERSION"
 
-          for attempt in 1 2 3 4 5; do
-            echo "Downloading Gradle, attempt $attempt..."
+          URLS=(
+            "https://downloads.gradle.org/distributions/gradle-$VERSION-bin.zip"
+            "https://services.gradle.org/distributions/gradle-$VERSION-bin.zip"
+            "https://mirrors.cloud.tencent.com/gradle/gradle-$VERSION-bin.zip"
+          )
+
+          DOWNLOADED=false
+
+          for URL in "${URLS[@]}"; do
+            echo "Trying: $URL"
 
             if curl -fL \
-              --connect-timeout 30 \
+              --connect-timeout 20 \
               --max-time 300 \
-              --retry 3 \
+              --retry 2 \
               --retry-all-errors \
-              "https://downloads.gradle.org/distributions/gradle-$GRADLE_VERSION-bin.zip" \
-              -o "$GRADLE_ZIP"; then
+              "$URL" -o "$ZIP"; then
+              DOWNLOADED=true
               break
             fi
 
-            if [ "$attempt" -eq 5 ]; then
-              echo "ERROR: Gradle download failed."
-              exit 1
-            fi
-
-            sleep 15
+            rm -f "$ZIP"
           done
 
-          unzip -q "$GRADLE_ZIP" -d "$RUNNER_TEMP"
+          if [ "$DOWNLOADED" != "true" ]; then
+            echo "ERROR: All Gradle download sources failed."
+            exit 1
+          fi
 
-          echo "$GRADLE_DIR/bin" >> "$GITHUB_PATH"
+          unzip -q "$ZIP" -d "$RUNNER_TEMP"
 
-          "$GRADLE_DIR/bin/gradle" --version
+          echo "$DIR/bin" >> "$GITHUB_PATH"
+
+          "$DIR/bin/gradle" --version
 
       - name: Build APK
         shell: bash
@@ -110,21 +110,18 @@ jobs:
 
           gradle --no-daemon --stacktrace assembleDebug
 
-          APK_PATH=$(find app/build/outputs/apk/debug \
+          APK=$(find app/build/outputs/apk/debug \
             -type f -name "*.apk" | head -n 1)
 
-          if [ -z "$APK_PATH" ]; then
-            echo "ERROR: APK was not generated."
+          if [ -z "$APK" ]; then
+            echo "ERROR: APK not generated."
             exit 1
           fi
 
           mkdir -p "$GITHUB_WORKSPACE/output"
+          cp "$APK" "$GITHUB_WORKSPACE/output/MusicAir.apk"
 
-          cp "$APK_PATH" "$GITHUB_WORKSPACE/output/MusicAir.apk"
-
-          echo "APK generated successfully."
-
-      - name: Upload APK artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: MusicAir-APK
