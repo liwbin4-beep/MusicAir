@@ -19,12 +19,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Extract project
+      - name: Extract project ZIP
         shell: bash
         run: |
           set -euo pipefail
 
-          ZIP_FILE=$(find . -maxdepth 1 -type f -iname "*.zip" | head -n 1)
+          ZIP_FILE=$(find . -maxdepth 1 -type f -iname "*.zip" -print -quit)
 
           if [ -z "$ZIP_FILE" ]; then
             echo "ERROR: Project ZIP not found."
@@ -34,13 +34,14 @@ jobs:
           mkdir -p project
           unzip -q "$ZIP_FILE" -d project
 
-          PROJECT_DIR=$(find project -type f -name "settings.gradle.kts" -printf '%h\n' | head -n 1)
+          SETTINGS_FILE=$(find project -type f -name "settings.gradle.kts" -print -quit)
 
-          if [ -z "$PROJECT_DIR" ]; then
-            echo "ERROR: Project configuration not found."
+          if [ -z "$SETTINGS_FILE" ]; then
+            echo "ERROR: settings.gradle.kts not found."
             exit 1
           fi
 
+          PROJECT_DIR=$(dirname "$SETTINGS_FILE")
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
       - name: Set up JDK 17
@@ -73,18 +74,21 @@ jobs:
             "https://mirrors.cloud.tencent.com/gradle/gradle-$VERSION-bin.zip"
           )
 
+          SUCCESS=false
+
           for URL in "${URLS[@]}"; do
             echo "Trying $URL"
+            rm -f "$ZIP"
 
             if curl -fL --connect-timeout 30 --max-time 300 \
-              --retry 3 --retry-all-errors "$URL" -o "$ZIP"; then
+              --retry 2 --retry-all-errors "$URL" -o "$ZIP" \
+              && unzip -tq "$ZIP" >/dev/null 2>&1; then
+              SUCCESS=true
               break
             fi
-
-            rm -f "$ZIP"
           done
 
-          if [ ! -s "$ZIP" ]; then
+          if [ "$SUCCESS" != "true" ]; then
             echo "ERROR: Gradle download failed."
             exit 1
           fi
@@ -95,99 +99,12 @@ jobs:
       - name: Cache Gradle dependencies
         uses: actions/cache@v4
         with:
-          path: ~/.gradle/caches
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper/dists
           key: ${{ runner.os }}-musicair-gradle-${{ hashFiles('project/**/*.gradle*', 'project/**/gradle.properties') }}
           restore-keys: |
             ${{ runner.os }}-musicair-gradle-
-
-      - name: Prepare Kotlin compiler local repository
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          VERSION="2.0.21"
-          GROUP_PATH="org/jetbrains/kotlin/kotlin-compiler-embeddable/$VERSION"
-          REPO="$RUNNER_TEMP/kotlin-local"
-          DEST="$REPO/$GROUP_PATH"
-
-          mkdir -p "$DEST"
-
-          BASE_URLS=(
-            "https://maven.aliyun.com/repository/central"
-            "https://repo.huaweicloud.com/repository/maven"
-            "https://maven.wso2.org/nexus/content/repositories/central"
-          )
-
-          SUCCESS=false
-
-          for BASE in "${BASE_URLS[@]}"; do
-            echo "Trying Kotlin mirror: $BASE"
-
-            rm -f "$DEST"/*
-
-            if curl -fL --connect-timeout 30 --max-time 300 \
-              --retry 3 --retry-all-errors \
-              "$BASE/$GROUP_PATH/kotlin-compiler-embeddable-$VERSION.pom" \
-              -o "$DEST/kotlin-compiler-embeddable-$VERSION.pom" \
-              && curl -fL --connect-timeout 30 --max-time 300 \
-              --retry 3 --retry-all-errors \
-              "$BASE/$GROUP_PATH/kotlin-compiler-embeddable-$VERSION.jar" \
-              -o "$DEST/kotlin-compiler-embeddable-$VERSION.jar"; then
-
-              if unzip -t "$DEST/kotlin-compiler-embeddable-$VERSION.jar" >/dev/null 2>&1; then
-                SUCCESS=true
-                echo "Kotlin compiler downloaded and verified."
-                break
-              fi
-            fi
-          done
-
-          if [ "$SUCCESS" != "true" ]; then
-            echo "ERROR: All Kotlin compiler mirrors failed."
-            exit 1
-          fi
-
-          echo "KOTLIN_LOCAL_REPO=$REPO" >> "$GITHUB_ENV"
-
-      - name: Configure dependency repositories
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          cat > "$RUNNER_TEMP/musicair.init.gradle" <<'EOF'
-          gradle.beforeProject { project ->
-              project.buildscript.repositories {
-                  maven {
-                      name = "localKotlinCompiler"
-                      url = uri(System.getenv("KOTLIN_LOCAL_REPO"))
-                  }
-                  maven {
-                      name = "aliyunCentral"
-                      url = uri("https://maven.aliyun.com/repository/central")
-                  }
-                  maven {
-                      name = "huaweiCentral"
-                      url = uri("https://repo.huaweicloud.com/repository/maven")
-                  }
-                  maven {
-                      name = "wso2Central"
-                      url = uri("https://maven.wso2.org/nexus/content/repositories/central")
-                  }
-              }
-
-              project.repositories {
-                  maven {
-                      url = uri("https://maven.aliyun.com/repository/central")
-                  }
-                  maven {
-                      url = uri("https://repo.huaweicloud.com/repository/maven")
-                  }
-                  maven {
-                      url = uri("https://maven.wso2.org/nexus/content/repositories/central")
-                  }
-              }
-          }
-          EOF
 
       - name: Build APK
         shell: bash
@@ -196,14 +113,10 @@ jobs:
 
           cd "$PROJECT_DIR"
 
-          gradle \
-            --no-daemon \
-            --stacktrace \
-            --init-script "$RUNNER_TEMP/musicair.init.gradle" \
-            assembleDebug
+          gradle --no-daemon --stacktrace assembleDebug
 
           APK=$(find app/build/outputs/apk/debug \
-            -type f -name "*.apk" | head -n 1)
+            -type f -name "*.apk" -print -quit)
 
           if [ -z "$APK" ]; then
             echo "ERROR: APK not generated."
